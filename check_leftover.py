@@ -34,7 +34,7 @@ KEYWORD_TO_FIELD = sorted(
 )
 KEYWORD_RE = re.compile("|".join(re.escape(kw) for kw, _ in KEYWORD_TO_FIELD))
 
-PROVINCE_ALIASES = {"กรุงเทพมหานคร": ["กรุงเทพมหานคร", "กรุงเทพฯ", "กรุงเทพ", "กทม."]}
+PROVINCE_ALIASES ={"กรุงเทพมหานคร": ["กรุงเทพมหานคร", "กรุงเทพฯ", "กรุงเทพ", "กทม."]}
 
 THAI_DIGIT_TRANS = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
 REPEATED_MARK_RE = re.compile(r"([\u0E31\u0E34-\u0E3A\u0E47-\u0E4E])\1+")
@@ -77,6 +77,12 @@ def value_pattern(value):
 def prefixed_value_pattern(field, value):
     kws = "|".join(re.escape(kw) for kw in sorted(FIELD_KEYWORDS[field], key=len, reverse=True))
     return re.compile(rf"(?:{kws})\s*{value_pattern(value).pattern}")
+
+
+@lru_cache(maxsize=None)
+def field_keyword_re(field):
+    kws = "|".join(re.escape(kw) for kw in sorted(FIELD_KEYWORDS[field], key=len, reverse=True))
+    return re.compile(kws)
 
 
 @lru_cache(maxsize=500_000)
@@ -163,9 +169,10 @@ def find_leftover(row, fuzzy_fields=None):
 
     # รอบแรก: ลบ "คำนำหน้า+ค่า" ของ key ตัวเอง (ถ.สุขุมวิท สำหรับ road)
     # กันไปลบค่าที่ซ้ำในส่วนอื่น เช่น "ซ.สุขุมวิท 101 ถ.สุขุมวิท"
+    # ลบทุกตัวที่ซ้ำ: "ชั้นที่ 7 ชั้น 7" floor=7 → ลบทั้งสอง
     pending = []
     for f, v in sorted(values, key=lambda x: len(x[1]), reverse=True):
-        text, n = prefixed_value_pattern(f, v).subn(" ", text, count=1)
+        text, n = prefixed_value_pattern(f, v).subn(" ", text)
         if not n:
             pending.append((f, v))
 
@@ -191,6 +198,14 @@ def find_leftover(row, fuzzy_fields=None):
                 ok = ok or bool(n)
         if ok and fuzzy_fields is not None:
             fuzzy_fields.append(f)
+
+    # รอบสุดท้าย: ช่วงที่ซ้ำของค่าหลายช่วง เช่น building="มหาวิทยาลัยเกษตรศาสตร์ อาคารศูนย์X"
+    # addr_input มี "อาคารศูนย์X อาคารศูนย์X" → ลบตัวที่เหลือ
+    for f, v in values:
+        for part in field_keyword_re(f).split(v):
+            part = part.strip()
+            if len(SEP_RE.sub("", part)) >= 2:
+                text = prefixed_value_pattern(f, part).sub(" ", text)
 
     leftovers = []
     for token in text.split():
