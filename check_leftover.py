@@ -13,7 +13,7 @@ from pathlib import Path
 from collections import Counter
 from functools import lru_cache
 
-from clean_address import FILL_KEYWORDS
+from clean_address import FILL_KEYWORDS, build_keyword_re
 
 GROUP_DIR = Path(r"D:\Thai_Adress\fill_data\group")
 OUT_DIR = GROUP_DIR / "leftover"
@@ -45,6 +45,9 @@ SEP_RE = re.compile(r"[\s.\-]")
 COMBINING_RE = re.compile(r"[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]")
 NON_DIGIT_RE = re.compile(r"\D")
 
+# leftover ที่มีแค่คำเดียวและเป็นคำเหล่านี้ ไม่ต้องส่งออก (หลายคำ เช่น "83 | และ | โฉนดเลขที่ | 8179" ยังส่งออก)
+IGNORE_SINGLE_LEFTOVER = {"โฉนด", "โฉนดที่ดิน"}
+
 # fuzzy match: \u0E04\u0E48\u0E32 key \u0E2A\u0E30\u0E01\u0E14\u0E15\u0E48\u0E32\u0E07\u0E08\u0E32\u0E01 addr_input \u0E40\u0E25\u0E47\u0E01\u0E19\u0E49\u0E2D\u0E22 (\u0E2D\u0E2D\u0E1F\u0E1F\u0E34\u0E28\u0E40\u0E28\u0E2A / \u0E2D\u0E2D\u0E1F\u0E1F\u0E34\u0E28\u0E40\u0E0B\u0E2A, \u0E40\u0E2E\u0E49\u0E32\u0E2A\u0E4C / \u0E40\u0E2E\u0E32\u0E2A\u0E4C)
 FUZZY_MIN_LEN = 4           # \u0E04\u0E48\u0E32\u0E2A\u0E31\u0E49\u0E19\u0E01\u0E27\u0E48\u0E32\u0E19\u0E35\u0E49\u0E44\u0E21\u0E48\u0E17\u0E33 fuzzy (\u0E01\u0E31\u0E19\u0E44\u0E1B\u0E25\u0E1A\u0E21\u0E31\u0E48\u0E27)
 FUZZY_MAX_DIST_RATIO = 0.3  # edit distance \u0E44\u0E14\u0E49\u0E44\u0E21\u0E48\u0E40\u0E01\u0E34\u0E19 30% \u0E02\u0E2D\u0E07\u0E04\u0E27\u0E32\u0E21\u0E22\u0E32\u0E27\u0E04\u0E48\u0E32
@@ -73,10 +76,20 @@ def value_pattern(value):
     return re.compile(body)
 
 
+# คำนำหน้าใช้กฎเดียวกับ clean_address.py (เช่น "วัด" ต้องไม่ติดอักษรไทยข้างหน้า
+# กันไปจับ "วัดเชียงราย" กลาง "จังหวัดเชียงราย" แล้วเหลือ "จังห")
+FIELD_KEYWORD_SPECS = {f: [k for k in FILL_KEYWORDS if k[1] == f] for f in FIELDS}
+FIELD_KEYWORD_SPECS["mooban"].append(("ม.", "mooban", True))
+
+
+@lru_cache(maxsize=None)
+def field_prefix_pattern(field):
+    return build_keyword_re(FIELD_KEYWORD_SPECS[field]).pattern
+
+
 @lru_cache(maxsize=500_000)
 def prefixed_value_pattern(field, value):
-    kws = "|".join(re.escape(kw) for kw in sorted(FIELD_KEYWORDS[field], key=len, reverse=True))
-    return re.compile(rf"(?:{kws})\s*{value_pattern(value).pattern}")
+    return re.compile(rf"(?:{field_prefix_pattern(field)})\s*{value_pattern(value).pattern}")
 
 
 @lru_cache(maxsize=None)
@@ -244,7 +257,7 @@ def main():
             fuzzy_fields = []
             tokens = find_leftover(rec, fuzzy_fields)
             n_fuzzy += bool(fuzzy_fields)
-            if not tokens:
+            if not tokens or (len(tokens) == 1 and tokens[0] in IGNORE_SINGLE_LEFTOVER):
                 continue
             guesses = [guess_field(t) for t in tokens]
             blank_hit = sorted({g for g in guesses if g and is_blank(rec[g])})
