@@ -23,7 +23,7 @@ FLAGS = ["not_in_patc_master", "deed_with_building"]
 for c in FLAGS:
     df[c] = df[c].fillna(False).astype(bool)
 df = df.fillna("")
-ROWS = df[COLS + FLAGS].to_dict("records")
+ROWS = df[COLS + FLAGS + ["duplicate_values"]].to_dict("records")
 for r in ROWS:
     for c in FLAGS:
         r[c] = bool(r[c])
@@ -66,6 +66,8 @@ input{width:100%;box-sizing:border-box;background:#111;color:#f3e9d8;border:1px 
   padding:6px;border-radius:4px}
 input:focus{outline:none;border-color:#ff7518;box-shadow:0 0 6px #ff751880}
 #f_leftover{border-color:#ff7518}
+input.dup{border-color:#a64dff;box-shadow:0 0 6px #a64dff80}
+.dupv{color:#c9a0ff;font-size:14px}
 label{display:block;margin-top:8px;font-size:13px;color:#999}
 .addr{background:#0a0a0a;padding:10px;border:1px solid #ff7518;border-radius:6px;font-size:18px;line-height:1.7}
 .addr mark{background:#ff7518;color:#1a0d00;border-radius:3px;padding:0 2px;font-weight:bold}
@@ -112,9 +114,16 @@ async function load(){
     `<div><label>not_in_patc_master</label><span class="patc ${p?'yes':'no'}">${p?'True — ไม่มีใน PATC master':'False'}</span></div>`+
     `<div><label>deed_with_building</label><span class="patc ${dw?'yes':'no'}">${dw?'True':'False'}</span></div>`+
     '</div>'+
+    (cur.duplicate_values?'<label>duplicate_values</label><div class="dupv"></div>':'')+
     '<br><button id="edit">Edit</button> <button id="pass">Pass</button>';
   b.querySelector('.addr').innerHTML=highlight(cur.addr_input,cur.leftover);
   F.forEach(f=>document.getElementById('f_'+f).value=cur[f]);
+  if(cur.duplicate_values){
+    b.querySelector('.dupv').textContent=cur.duplicate_values;
+    // "value: mooban,soi (addr_input 1) | ..." -> outline the listed field inputs
+    cur.duplicate_values.split('|').forEach(p=>{const m=p.match(/:\\s*([\\w,]+)\\s*\\(/);
+      if(m)m[1].split(',').forEach(f=>{const el=document.getElementById('f_'+f);if(el)el.classList.add('dup')})});
+  }
   document.getElementById('edit').onclick=()=>save('edit');
   document.getElementById('pass').onclick=()=>save('pass');
 }

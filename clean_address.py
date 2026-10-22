@@ -89,7 +89,7 @@ FILL_KEYWORDS = [
     # บูธ/ยูนิต/แผงค้า... (+ เลขที่) → room ไม่ใช่ no ("919/1 บูธเลขที่ บีบี017" → no = 919/1, room = บีบี017)
     *[(w, "room", True) for w in ROOM_UNIT_ALONE_WORDS],
     *[(f"{w} เลขที่", "room", True) for w in ROOM_UNIT_WORDS],
-    ("ซอย", "soi", True), ("ซ.", "soi", True),
+    ("ซอย", "soi", True), ("ซ.", "soi", True), ("ตรอก", "soi", True),
     ("ถนน", "road", True), ("ถ.", "road", True),
     # ตำบล/อำเภอ/จังหวัด มักติดท้ายชื่อ เช่น "ตำบลในเมืองอำเภอเมือง"
     # คำย่อมีจุด (ต./อ./จ./ม./ซ./ถ.) ห้ามมีตัวอักษรนำหน้าเสมอ ("บจ." ไม่ใช่จังหวัด)
@@ -137,7 +137,7 @@ KEYWORD_CANON = {kw.replace(" ", ""): kw for kw, _, _ in FILL_KEYWORDS}
 
 # คำไทย 1 คำระหว่างคำนำหน้า (ห้าม ตัวเลข/อังกฤษ/คำนำหน้า key อื่น) → ยังเป็นคำนำหน้าเดียวกัน
 # "ห้อง บูธเลขที่ JB303", "ห้อง พื้นที่เลขที่ ทีเอ็นซี.เอฟ01.ซ", "ห้อง แผงค้าเลขที่ FMF15-006" → room
-_INFIX_WORD = r"(?:(?:(?!อาคาร|ตึก|ชั้น|ถนน|ซอย|หมู่|บ้าน|เลขที่)[ก-๎])+\s*)?"
+_INFIX_WORD = r"(?:(?:(?!อาคาร|ตึก|ชั้น|ถนน|ซอย|ตรอก|หมู่|บ้าน|เลขที่)[ก-๎])+\s*)?"
 KEYWORD_INFIX = {"ห้อง เลขที่": _INFIX_WORD}
 KEYWORD_INFIX_RE = {kw: re.compile(rf"{re.escape(kw.split(' ')[0])}\s*{infix}{re.escape(kw.split(' ')[1])}")
                     for kw, infix in KEYWORD_INFIX.items()}
@@ -159,6 +159,7 @@ KEYWORD_NOT_FOLLOWED = {}
 # คำนำหน้าที่มี "." ทุกตัว ห้ามมีตัวอักษรไทย/อังกฤษนำหน้า (ดู build_keyword_re)
 #   "บจ." "บมจ." ไม่ใช่จังหวัด, "กม." "กทม." "km." ไม่ใช่ หมู่/หมู่บ้าน
 # "ม." เพิ่ม: "ก.ม." ไม่ใช่ หมู่/หมู่บ้าน
+#   "ซ.ม.เพชรเกษม 2" → ม. ติดหลัง ซ. เป็นส่วนของชื่อซอย (soi = ม.เพชรเกษม 2)
 KEYWORD_NOT_PRECEDED = {"ม.": [rf"[{THAI_RANGE}A-Za-z]\."]}
 # คำนำหน้าที่มักเป็นต้นชื่อ soi/road/tambol ด้วย (ซอยวัดใหม่, ตำบลศาลเจ้า) → ใช้แยกช่วงจาก
 # addr_input เท่านั้น (Step 7) ไม่ใช้ตัดค่าเดิมของ key อื่น (Step 6.3) และไม่บังคับ key (OWNED_WORDS)
@@ -349,13 +350,42 @@ def glued_to_prev(prev_m, m, body):
     ยกเว้น คำย่อมีจุด ("ต.อ.เมือง"), _stop, และ ชั้น/ห้อง/เลขที่ ตามด้วยเลข ("อาคารชั้นที่ 2")"""
     if prev_m is None or prev_m.end() != m.start():
         return False
-    raw = m.group(0)
+    return is_name_part(m.group(0), body)
+
+
+def is_name_part(raw, body):
+    """คำนำหน้า raw ที่ติดหลังคำนำหน้าอื่น เป็นส่วนของชื่อได้ไหม (ข้อยกเว้นของ glued_to_prev)"""
     field = FILL_KEYWORD_FIELD[canon_keyword(raw)]
     if raw.endswith(".") or field == "_stop":
         return False
     if field in NUMERIC_FIELDS and body.lstrip()[:1].isdigit():
         return False
     return True
+
+
+def glued_head_in_input(col, v, m, addr_input):
+    """ค่า v ของ col ขึ้นต้นด้วยคำนำหน้า key อื่น (m) แต่ใน addr_input ค่านี้ติดหลังคำนำหน้าของ col
+    → คำนำหน้าแรกเป็น key คำที่ 2 เป็นส่วนของชื่อ (เหมือน glued_to_prev ใน Step 7)
+    road = "ตรอกบางขุนพรหม", addr_input "...ถนนตรอกบางขุนพรหม..." → True (road คงเดิม, soi ว่าง)
+    คำย่อมีจุดติดหลังตัวอักษร ไม่ใช่คำนำหน้าใน Step 7 (build_keyword_re) → ส่วนของชื่อเหมือนกัน
+    soi = "ม.พุดตาน", addr_input "ซอยม.พุดตาน ..." / "ซ.ม.พุดตาน ..." → True (soi คงเดิม, mooban ว่าง)
+    ยึดตาม Step 7: ใน addr_input ตรงนั้นคำย่อไม่ถูกจับเป็นคำนำหน้า จึงเป็นส่วนของชื่อ
+    "ซอย ม.พุดตาน" (มีช่องว่าง) / "ต.อ.เมือง" → ม./อ. เป็นคำนำหน้าจริง → False"""
+    if not isinstance(addr_input, str):
+        return False
+    dotted = m.group(0).endswith(".")
+    if not dotted and not is_name_part(m.group(0), v[m.end():]):
+        return False
+    head = re.sub(r"\s+", " ", v).strip()
+    matches = list(FILL_KEYWORD_RE.finditer(addr_input))
+    kw_starts = {p.start() for p in matches}
+    for p in matches:
+        if (FILL_KEYWORD_FIELD[canon_keyword(p.group(0))] == col
+                and re.sub(r"\s+", " ", addr_input[p.end():p.end() + len(v) * 2]).startswith(head)):
+            if dotted and (addr_input[p.end():p.end() + 1] != head[:1] or p.end() in kw_starts):
+                continue
+            return True
+    return False
 
 
 # moo เป็นเลขล้วน ส่วน mooban มีตัวอักษร (อาจมีเลขด้วย)
@@ -375,6 +405,26 @@ KEEP_KEYWORDS = {"มหาวิทยาลัย", "มหาลัย", "อ
 # key ที่ค่าเป็นคำเดียว (ตัดที่ช่องว่างแรก) — ที่เหลือเอาทั้งช่วงจนถึงคำนำหน้าถัดไป
 # tambol/amphoe/province ใช้หลายคำได้ถ้าตรงกับชื่อใน DB_POSTCODE
 SINGLE_TOKEN_FIELDS = {"no", "moo"}
+# floor = เลข + ชื่อ → floor = เลข, ชื่อไป building ("ชั้น 5 แฟรี่แลนด์" → floor = 5, building = แฟรี่แลนด์)
+# ชื่อต้องมีพยัญชนะ 4 ตัวขึ้นไป (ไม่ใช่ "12 เอ", "1 เอฟ") และไม่ใช่รายละเอียดของชั้น ("9 โซนซี", "1 และชั้นลอย")
+FLOOR_DETAIL_WORDS = ["และ", "ถึง", "ชั้น", "โซน", "บล็อค", "บล๊อค", "บล็อก", "ล็อค", "ล็อก", "พื้นที่", "ตำแหน่ง",
+                      "ฝั่ง", "ด้าน", "ผัง", "ส่วน", "เซ็คชั่น", "เซคชั่น", "ออฟฟิศ", "สำนักงาน", "คอนคอร์ส",
+                      "ลาน", "ใต้ดิน", "ลอย", "ดาดฟ้า", "เฟส", "บริเวณ", "ของ", "บน", "ห้อง", "หัอง"]
+FLOOR_NAME_RE = re.compile(rf"^(\d+)\s*([{THAI_RANGE}].*)$")
+# floor ไม่เก็บ โซน/ล็อค/บล็อค ตัดตั้งแต่คำนั้นไปจนจบ ("2 โซนเอ" → 2, "8 บล็อค ไอ" → 8, "G โซน B" → G)
+FLOOR_ZONE_RE = re.compile(r"\s*(?:โซน|บ?ล[็๊]?อ[คก]).*$")
+
+
+def split_floor_name(v):
+    """คืน (เลขชั้น, ชื่อ) ถ้า floor เป็นเลข + ชื่อ ไม่งั้นคืน (v, None)"""
+    m = FLOOR_NAME_RE.match(v)
+    if not m:
+        return v, None
+    name = m.group(2).strip()
+    if (any(name.startswith(w) for w in FLOOR_DETAIL_WORDS) or "ชั้น" in name
+            or len(re.findall(r"[ก-ฮ]", name)) < 4):
+        return v, None
+    return m.group(1), name
 # คำที่ต้องอยู่ใน key ของมันเท่านั้น ถ้าไปอยู่ key อื่นให้ลบค่านั้นทิ้ง
 OWNED_WORDS = {"มหาวิทยาลัย": "building", "มหาลัย": "building", "อุทยาน": "building",
                "นิคมอุตสาหกรรม": "mooban"}
@@ -383,9 +433,13 @@ DB_NAME_FIELDS = ("tambol", "amphoe", "province")
 # "191/66", "ข 49/3", "ค.2-ค.3", "1/ 1", "139,141" → เอาทั้งก้อน
 # "และ" คั่นเลขเหมือน "," ("440 และ 442" → เอาทั้งก้อน)
 # อักษรไทย 1 ตัวต่อท้ายเลขได้ ("30/155 ก.", "12ข") แต่ไม่ใช่ตัวย่อ ม/ซ/ถ/ต/อ/จ (หมู่/ซอย/ถนน/ตำบล/อำเภอ/จังหวัด)
+# คั่นด้วยช่องว่างอย่างเดียวได้ ถ้าเลขถัดไปมี / ("1/47 1/48 หมู่ที่ 8" → 1/47 1/48)
 _NO_UNIT = r"(?:(?!ม)[ก-ฮ]\.?\s?)?\d+"
 _NO_SUFFIX = r"(?:\s?(?![มซถตอจ])[ก-ฮ]\.?)?"
-NO_VALUE_RE = re.compile(rf"{_NO_UNIT}(?:\s*(?:[/\-,]|และ)\s*{_NO_UNIT})*{_NO_SUFFIX}[/\-]?(?![^\s,])")
+NO_VALUE_RE = re.compile(
+    rf"{_NO_UNIT}(?:\s*(?:[/\-,]|และ)\s*{_NO_UNIT}|\s+{_NO_UNIT}(?=\s*/\s*\d))*"
+    rf"{_NO_SUFFIX}[/\-]?(?![^\s,])"
+)
 # เอกสารสิทธิ์ที่ดิน (โฉนด, น.ส.3, น.ส.3ก, น.ส.3ข, น.ส.4, ส.ป.ก. 4-01) + เลข → เก็บทั้งก้อนเป็น no
 # ตั้งแต่ชื่อเอกสารจนถึงตัวเลขตัวสุดท้าย (รวม บ้านเลขที่/เลขที่ ที่ตามมาติดกัน)
 # "โฉนดเลขที่ 123" → no = "โฉนดเลขที่ 123"
@@ -412,6 +466,8 @@ DEED_NO_RE = re.compile(
 )
 # เลขบ้านที่อยู่ติดหน้าเลขโฉนด เก็บรวมใน no ก้อนเดียวกัน ("เลขที่ 5 โฉนดเลขที่ 99")
 DEED_LEAD_NO_RE = re.compile(rf"(?:บ้าน\s*)?เลขที่\s*[:\-]?\s*{_HOUSE_NUM}\s*,?\s*$")
+# เลขโฉนดหลายใบคั่นด้วย และ/"," → ก้อนเดียวกัน ("โฉนดเลขที่ 8178 และ โฉนดเลขที่ 8179")
+DEED_JOIN_RE = re.compile(r"\s*(?:,|และ)?\s*")
 
 
 def split_deed(v):
@@ -420,26 +476,37 @@ def split_deed(v):
     คำนำหน้าของ key อื่นที่อยู่ติดหน้าเลขโฉนด ตัดทิ้งด้วย ตอบแค่ no
     ("อาคารน.ส.3 ก.เลขที่ 1259 ตำบล..." → (" ตำบล...", ["น.ส.3 ก.เลขที่ 1259"]))
     เลขบ้านที่อยู่ติดหน้าเลขโฉนด รวมเป็น no ก้อนเดียวกัน
-    ("เลขที่ 5 โฉนดเลขที่ 99 หมู่ 2" → (" หมู่ 2", ["เลขที่ 5 โฉนดเลขที่ 99"]))"""
+    ("เลขที่ 5 โฉนดเลขที่ 99 หมู่ 2" → (" หมู่ 2", ["เลขที่ 5 โฉนดเลขที่ 99"]))
+    เลขบ้านต้นข้อความ (ไม่มีคำนำหน้า) และเลขโฉนดหลายใบที่คั่นด้วย และ/"," รวมเป็นก้อนเดียวตามที่พิมพ์มา
+    ("83 อาคารโฉนดเลขที่ 8178 และ โฉนดเลขที่ 8179 ถนน..." →
+     (" ถนน...", ["83 อาคารโฉนดเลขที่ 8178 และ โฉนดเลขที่ 8179"]))"""
     if not isinstance(v, str):
         return v, []
-    deeds = []
-    out, pos = [], 0
+    spans = []  # [จุดตัดออกจากข้อความ, จุดเริ่มค่า no, จุดจบ] ของแต่ละก้อน
     for m in DEED_NO_RE.finditer(v):
-        start = m.start()
-        before = v[pos:start]
+        pos = spans[-1][2] if spans else 0
+        before = v[pos:m.start()]
+        if spans and DEED_JOIN_RE.fullmatch(before):
+            spans[-1][2] = m.end()
+            continue
+        cut = start = m.start()
         lead_no = DEED_LEAD_NO_RE.search(before)
         if lead_no:
-            start = pos + lead_no.start()
+            cut = start = pos + lead_no.start()
         else:
             before = before.rstrip()
             kw = [k for k in FILL_KEYWORD_RE.finditer(before) if k.end() == len(before)]
-            if kw:
-                start = pos + kw[-1].start()
-        deed = v[lead_no.start() + pos:m.end()] if lead_no else m.group(0)
-        deeds.append(re.sub(r"\s+", " ", deed).strip())
-        out.append(v[pos:start] + " ")
-        pos = m.end()
+            head = before[:kw[-1].start()] if kw else before
+            if not spans and head.strip() and NO_VALUE_RE.fullmatch(head.strip()):
+                cut = start = len(head) - len(head.lstrip())
+            elif kw:
+                cut = pos + kw[-1].start()
+        spans.append([cut, start, m.end()])
+    deeds, out, pos = [], [], 0
+    for cut, start, end in spans:
+        deeds.append(re.sub(r"\s+", " ", v[start:end]).strip())
+        out.append(v[pos:cut] + " ")
+        pos = end
     out.append(v[pos:])
     return DEED_RE.sub(" ", "".join(out)), deeds
 DB_POSTCODE_PATH = r"D:\Thai_Adress\qwen3_8b_lora\EDA\DataStandardList-Postcode_converted.csv"
@@ -615,7 +682,7 @@ COLUMN_RULES = {
             ("มีอักษรไทย", lambda v: isinstance(v, str) and bool(THAI_CHAR_RE.search(v))),
         ],
         "should_not": [
-            ("มีคำนำหน้า ซอย/ซ.", prefix_any(["ซอย", "ซ."])),
+            ("มีคำนำหน้า ซอย/ซ./ตรอก", prefix_any(["ซอย", "ซ.", "ตรอก"])),
             ("มีอักขระพิเศษ", lambda v: isinstance(v, str)
                 and bool(SPECIAL_CHARS_RE.search(re.sub(r"[/\-]", "", v)))),
         ],
@@ -662,7 +729,7 @@ OWN_KEYWORDS = {
     "building": ["อาคาร"],
     "floor":    ["ชั้น"],
     "room":     ["ห้อง"],
-    "soi":      ["ซอย", "ซ."],
+    "soi":      ["ซอย", "ซ.", "ตรอก"],
     "road":     ["ถนน", "ถ."],
     "tambol":   ["ตำบล", "ต."],
     "amphoe":   ["อำเภอ", "อ."],
@@ -679,7 +746,7 @@ PREFIX_RULES = {
     "room":     (rf'^(\s*(เลขที่\s*ห้อง|ห้อง\s*{_INFIX_WORD}เลขที่|ห้อง'
                  rf'|(?:{"|".join(ROOM_UNIT_WORDS)})\s*เลขที่|{"|".join(ROOM_UNIT_ALONE_WORDS)})\s*)',
                  "เลขที่ห้อง/ห้องเลขที่/ห้อง บูธเลขที่/ห้อง/บูธเลขที่/บูธ/ยูนิต"),
-    "soi":      (r'^(\s*(ซอย|ซ\.)\s*)', "ซอย/ซ."),
+    "soi":      (r'^(\s*(ซอย|ซ\.|ตรอก)\s*)', "ซอย/ซ./ตรอก"),
     "road":     (r'^(\s*(ถนน|ถ\.)\s*)', "ถนน/ถ."),
     "tambol":   (r'^(\s*(ตำบล|ต\.)\s*)', "ตำบล/ต."),
     "amphoe":   (r'^(\s*(อำเภอ|อ\.)\s*)', "อำเภอ/อ."),
@@ -936,10 +1003,16 @@ def clean_address_data():
     # 6.3: ค่าที่มีคำนำหน้าของ key อื่นปน → ไม่ลบแถว แต่เก็บเฉพาะช่วงของ key ตัวเอง
     #      soi = "ซอย 5 ถนนสุขุมวิท" → "ซอย 5" (คำนำหน้า ซอย ถูกลบใน Step 7 → "5")
     #      ส่วนที่ตัดออกย้ายไป key ของมัน (เขียนทับค่าเดิม): tambol = "ในเมืองอ.เมือง" → amphoe = "เมือง"
-    def keep_own_segments(col, v):
+    def keep_own_segments(col, v, addr_input=None):
         """คืน (ค่าที่เก็บไว้, {key อื่น: [ค่าที่ตัดออก]})"""
         moved = defaultdict(list)
         matches = list(CUT_KEYWORD_RE.finditer(v))
+        # คำนำหน้า 2 ประเภทติดกัน → คำนำหน้าแรกเป็น key (ทุก key)
+        # road = "ตรอกบางขุนพรหม" จาก "ถนนตรอกบางขุนพรหม" → ตรอก เป็นต้นชื่อถนน ไม่ใช่คำนำหน้า soi
+        if matches and not v[:matches[0].start()].strip():
+            head = v[:matches[1].start()] if len(matches) > 1 else v
+            if glued_head_in_input(col, head, matches[0], addr_input):
+                matches = matches[1:]
         if not matches:
             return v, moved
         own_kw = OWN_KEYWORDS.get(col, [])
@@ -983,7 +1056,7 @@ def clean_address_data():
         for pos, (row_idx, val) in enumerate(zip(df.index, cut_data[col])):
             if not isinstance(val, str):
                 continue
-            new_val, moved = keep_own_segments(col, val)
+            new_val, moved = keep_own_segments(col, val, addr_input_clean[row_idx])
             if new_val == re.sub(r"\s+", " ", val).strip():
                 continue  # ไม่มีส่วนของ key อื่น ปล่อยให้ Step 7 จัดการช่องว่าง
             n_cut[col] += 1
@@ -1156,6 +1229,7 @@ def clean_address_data():
           tambol/amphoe/province → ชื่อยาวสุดที่ตรงกับ DB_POSTCODE ไม่ตรงเอาคำแรก
         ทุก key: ช่วงท้ายสุดไม่มีคำนำหน้าปิด → จบที่ "," """
         found = defaultdict(list)
+        spill = defaultdict(list)  # ค่าที่แยกออกจาก floor → ต่อท้ายค่าของ key นั้น
         if not isinstance(addr_input, str):
             return found
         # เลขโฉนด/น.ส.3/น.ส.3ก/น.ส.3ข/น.ส.4/ส.ป.ก. แยกออกก่อน เก็บทั้งก้อนเป็น no
@@ -1221,6 +1295,11 @@ def clean_address_data():
                 v = pick_known_name(col, v)
             if col == "moo":
                 v = re.match(r"\d*", v).group(0)
+            # "ชั้น 5 แฟรี่แลนด์" → floor = 5, building = แฟรี่แลนด์
+            if col == "floor":
+                v, name = split_floor_name(v)
+                if name:
+                    spill["building"].append(name)
             # แขวงลาดยาวเขตจตุจักร → ลาดยาว (แต่ หลักเขต/คีรีเขต เป็นชื่อตำบลจริง)
             if col == "tambol" and "เขต" in v and v not in known_names["tambol"]:
                 v = v[:v.rfind("เขต")]
@@ -1228,6 +1307,13 @@ def clean_address_data():
                 continue
             if WORD_CHAR_RE.search(v) and v not in found[col]:
                 found[col].append(v)
+        # ต่อท้ายค่าที่มีอยู่ ("อาคารเซ็นทรัล ชั้น 5 แฟรี่แลนด์" → building = เซ็นทรัล, แฟรี่แลนด์)
+        # ชื่อที่อยู่ใน key อื่นแล้ว ไม่เติมซ้ำ ("ชั้น 3 สุขุมวิท ... ถนนสุขุมวิท" → building ว่าง)
+        for col, vals in spill.items():
+            others = [x.replace(" ", "") for c, xs in found.items() if c != col for x in xs]
+            for x in dict.fromkeys(vals):
+                if x not in found[col] and not any(x.replace(" ", "") in o for o in others):
+                    found[col].append(x)
 
         # คำนำหน้าประเภทเดียวกัน 2 ค่าที่คล้ายกัน (ค่าสั้นอยู่ในค่ายาว) → เอาตัวที่มีอักษรมากกว่า
         # ("หมู่บ้านเสนานิเวศน์ ... (หมู่บ้านเสนานิเวศน์ 1)" → mooban = เสนานิเวศน์ 1)
@@ -1300,7 +1386,8 @@ def clean_address_data():
     print(f"   [ใหม่] ทุก key: ข้อความตั้งแต่หลังคำนำหน้าตัวแรก จนถึงคำนำหน้าของ key อื่น คือค่าของ key แรก "
           f"เก็บตามที่พิมพ์มา รวม และ/, และคำนำหน้าซ้ำระหว่างทาง "
           f"('ชั้น 10และชั้น 11 ห้อง...' → floor = '10และชั้น 11', 'ห้อง (ยูนิต 3-4) ถนน...' → room = '(ยูนิต 3-4)')")
-    print(f"   [ใหม่] no: 'และ' คั่นเลขบ้านเหมือน ',' ('440 และ 442 ซอย...' → no = '440 และ 442')")
+    print(f"   [ใหม่] ตรอก เป็นคำนำหน้า soi เหมือน ซอย/ซ. ('ตรอกจันทน์ ถนน...' → soi = จันทน์)")
+    print(f"   [ใหม่] no: 'และ' คั่นเลขบ้านเหมือน ','('440 และ 442 ซอย...' → no = '440 และ 442')")
     print(f"   [ใหม่] เลขที่ หลังคำว่า บ้าน → no, หลังคำว่า ห้อง → room (มีช่องว่างคั่นได้) "
           f"('บ้าน เลขที่ 12' → no = 12, 'ห้อง เลขที่ 5' → room = 5)")
     print(f"   [ใหม่] ห้อง + คำไทย 1 คำ + เลขที่ → room (บูธ/พื้นที่/ยูนิต/แผงค้า...) "
@@ -1426,6 +1513,103 @@ def clean_address_data():
     print(f"7.5 [ใหม่] ลบค่าที่ไม่ปรากฏใน addr_input เสร็จแล้ว: {fmt_counts(n_not_in_input)}")
     print(f"      [ใหม่] no: เลขโฉนด/น.ส.3/น.ส.3ก/น.ส.3ข/น.ส.4/ส.ป.ก. ไม่ลบแล้ว เทียบกับ addr_input ทั้งข้อความ "
           f"('โฉนดเลขที่ 123' เก็บไว้)")
+
+    # ==========================================
+    # Step 7.59: คำใน addr_input ที่ไม่ซ้ำ ใส่ได้ key เดียว
+    #            ค่าที่อยู่ในค่าของ key อื่น (ค่าสั้นอยู่ในค่ายาว) ต้องปรากฏแยกเองใน addr_input
+    #            ไม่งั้นลบออกจาก key ที่เป็นค่าสั้น
+    #            ช่วงของค่ายาว = คำนำหน้าของ key นั้น + ค่ายาว ("ซอย" + "ม.พุดตาน")
+    #            ค่าสั้นต้องมีสักครั้งที่อยู่นอกทุกช่วง
+    #            "ซอยม.พุดตาน ถนน..." soi = ม.พุดตาน, mooban = พุดตาน → mooban = ว่าง
+    #            "หมู่บ้านพุดตาน ซอยม.พุดตาน ..." พุดตาน มีนอกช่วง soi → เก็บทั้ง 2 key
+    #            "ถนนพญาไท แขวงถนนพญาไท" road = พญาไท มีนอกช่วง แขวงถนนพญาไท → เก็บ
+    #            "อาคารถนนสุขุมวิท ซอยศูนย์การค้า ถนนสุขุมวิท" road = สุขุมวิท มีนอกช่วง อาคารถนนสุขุมวิท → เก็บ
+    #            ตรวจเฉพาะ mooban/building/soi/road
+    #            (no/moo/floor/room เป็นเลข, tambol/amphoe/province ตรงกับ DB อยู่แล้ว
+    #             "ถนนนวมินทร์ คลองกุ่ม เขตบึงกุ่ม" road ผิด ไม่ใช่ tambol = คลองกุ่ม)
+    # ==========================================
+    DUP_WORD_FIELDS = ["mooban", "building", "soi", "road"]
+    # SOFT_KEYWORDS มักเป็นต้นชื่อ key อื่น ไม่นับเป็นคำนำหน้า
+    # ("ซอยศูนย์การค้า ถนนสุขุมวิท" → ไม่ใช่ building "ศูนย์การค้า"+"ถนนสุขุมวิท", road = สุขุมวิท คงไว้)
+    col_prefixes = defaultdict(set)
+    for kw, f, _ in FILL_KEYWORDS:
+        if kw not in SOFT_KEYWORDS:
+            col_prefixes[f].add(kw.replace(" ", ""))
+    for f, kws in OWN_KEYWORDS.items():
+        col_prefixes[f].update(kws)
+    col_prefix_re = {f: "(?:" + "|".join(re.escape(p) for p in sorted(kws, key=len, reverse=True)) + ")"
+                     for f, kws in col_prefixes.items()}
+
+    def free_in_input(k, spans, inp):
+        """k มีสักครั้งใน inp ที่ไม่อยู่ในช่วงใดของ spans"""
+        for m in re.finditer(f"(?={re.escape(k)})", inp):
+            s, e = m.start(), m.start() + len(k)
+            if not any(a <= s and e <= b for a, b in spans):
+                return True
+        return False
+
+    n_dup_word = defaultdict(int)
+    for row_idx, addr_input in zip(df.index, addr_input_clean):
+        if is_blank(addr_input):
+            continue
+        inp_nospace = norm_text(addr_input).replace(" ", "")
+        parts_by_col = {}
+        for col in fill_cols:
+            v = df.at[row_idx, col]
+            if not is_blank(v):
+                parts_by_col[col] = [x.strip() for x in str(v).split(",") if x.strip()]
+        for col, parts in parts_by_col.items():
+            if col not in DUP_WORD_FIELDS:
+                continue
+            kept = []
+            for p in parts:
+                k = norm_text(p).replace(" ", "")
+                # ช่วงของค่ายาว key อื่นที่มีคำนี้อยู่ข้างใน (ตามหลังคำนำหน้าของ key นั้น)
+                spans = [m.span()
+                         for other, others in parts_by_col.items() if other != col
+                         for lk in (norm_text(o).replace(" ", "") for o in others)
+                         if k and k != lk and k in lk
+                         for m in re.finditer(col_prefix_re[other] + re.escape(lk), inp_nospace)]
+                if THAI_CHAR_RE.search(k) and spans and not free_in_input(k, spans, inp_nospace):
+                    continue
+                kept.append(p)
+            if len(kept) == len(parts):
+                continue
+            old_val = df.at[row_idx, col]
+            new_val = ", ".join(kept) or None
+            df.at[row_idx, col] = new_val
+            modified_indices.add(row_idx)
+            edit_indices.add(row_idx)
+            modified_row_reasons[row_idx].append(
+                f"{col}: '{old_val}' → '{as_text(new_val)}' "
+                f"[{describe_char_changes(old_val, new_val)}] (คำใน addr_input ไม่ซ้ำ อยู่ในค่าของ key อื่นแล้ว)"
+            )
+            mod_logs_total += 1
+            n_dup_word[col] += 1
+    print(f"7.59 [ใหม่] คำที่ไม่ซ้ำใน addr_input ใส่ได้ key เดียว ('ซอยม.พุดตาน' → soi = ม.พุดตาน, mooban = ว่าง) "
+          f"เสร็จแล้ว: {fmt_counts(n_dup_word)}")
+
+    # ==========================================
+    # Step 7.595: floor ไม่เก็บ โซน/ล็อค/บล็อค ("2 โซนเอ" → 2, "8 บล็อค ไอ" → 8)
+    #             คำนั้นอยู่ต้นค่า ("ล็อค 2") ไม่ตัด
+    # ==========================================
+    n_floor_zone = 0
+    if "floor" in df.columns:
+        for row_idx in df.index[df["floor"].apply(lambda v: isinstance(v, str) and bool(FLOOR_ZONE_RE.search(v)))]:
+            old_val = df.at[row_idx, "floor"]
+            new_val = FLOOR_ZONE_RE.sub("", old_val).strip(" ,")
+            if not WORD_CHAR_RE.search(new_val):
+                continue
+            df.at[row_idx, "floor"] = new_val
+            modified_indices.add(row_idx)
+            edit_indices.add(row_idx)
+            modified_row_reasons[row_idx].append(
+                f"floor: '{old_val}' → '{new_val}' "
+                f"[{describe_char_changes(old_val, new_val)}] (floor ไม่เก็บ โซน/ล็อค)"
+            )
+            mod_logs_total += 1
+            n_floor_zone += 1
+    print(f"7.595 [ใหม่] floor ตัด โซน/ล็อค/บล็อค ('2 โซนเอ' → 2) เสร็จแล้ว: floor={n_floor_zone:,}")
 
     # ==========================================
     # Step 7.6: Apply manual edits (แทน 11 key ตามไฟล์แก้มือ)

@@ -247,6 +247,39 @@ def find_leftover(row, fuzzy_fields=None):
     return leftovers
 
 
+LETTER_RE = re.compile(r"[a-zA-Zก-ฮ]")
+
+
+def find_duplicate_values(row):
+    """ค่าที่ซ้ำกันหลาย key (เท่ากันหรืออยู่ในค่าของ key อื่น) แต่ addr_input มีคำนั้นน้อยกว่าจำนวน key
+    เช่น soi=บางขุนพรหม, road=ตรอกบางขุนพรหม, tambol=บางขุนพรหม แต่ addr_input มี "บางขุนพรหม" แค่ 2 ที่
+    road=ลาดพร้าว + amphoe=ลาดพร้าว และ addr_input มี "ถ.ลาดพร้าว เขตลาดพร้าว" → ไม่นับ
+    คืน list ของ "ค่า: key1,key2 (addr_input N)" """
+    text = row["addr_input"]
+    if is_blank(text):
+        return []
+    text = normalize(str(text))
+    vals = {f: normalize(str(row[f])) for f in FIELDS if not is_blank(row[f])}
+
+    dups, seen = [], set()
+    for f, v in vals.items():
+        if v in seen or len(LETTER_RE.findall(v)) < 2:
+            continue
+        seen.add(v)
+        pat = value_pattern(v)
+        claimers = [g for g, w in vals.items()
+                    if pat.search(w)
+                    # อำเภอเมืองเชียงใหม่ + จังหวัดเชียงใหม่ ปกติ แม้ addr_input จะเขียนแค่ "อ.เมือง"
+                    and not (f == "province" and g == "amphoe" and SEP_RE.sub("", w) == "เมือง" + SEP_RE.sub("", v))]
+        if len(claimers) < 2:
+            continue
+        aliases = PROVINCE_ALIASES.get(v, [v]) if f == "province" else [v]
+        n_found = sum(len(value_pattern(a).findall(text)) for a in aliases)
+        if n_found < len(claimers):
+            dups.append(f"{v}: {','.join(claimers)} (addr_input {n_found})")
+    return dups
+
+
 def guess_field(token):
     if token.startswith("ม."):
         return "moo" if token[2:3].isdigit() else "mooban"
@@ -280,7 +313,8 @@ def main():
             not_in_patc = patc_key(rec) not in patc_set
             deed_building = (not is_blank(rec["addr_input"]) and not is_blank(rec["building"])
                              and bool(DEED_RE.search(str(rec["addr_input"]))))
-            if not tokens and not not_in_patc and not deed_building:
+            dup_values = find_duplicate_values(rec)
+            if not tokens and not not_in_patc and not deed_building and not dup_values:
                 continue
             guesses = [guess_field(t) for t in tokens]
             blank_hit = sorted({g for g in guesses if g and is_blank(rec[g])})
@@ -293,6 +327,7 @@ def main():
                 "fuzzy_matched_fields": ",".join(fuzzy_fields) or None,
                 "not_in_patc_master": not_in_patc,
                 "deed_with_building": deed_building,
+                "duplicate_values": " | ".join(dup_values) or None,
             })
 
     out = pd.DataFrame(results)
@@ -300,6 +335,7 @@ def main():
     n_left = int(out["leftover"].notna().sum()) if n_out else 0
     n_patc = int(out["not_in_patc_master"].sum()) if n_out else 0
     n_deed = int(out["deed_with_building"].sum()) if n_out else 0
+    n_dup = int(out["duplicate_values"].notna().sum()) if n_out else 0
     blank_mask = out["blank_key_with_leftover"].notna() if n_out else pd.Series(dtype=bool)
     n_blank = int(blank_mask.sum())
 
@@ -312,6 +348,8 @@ def main():
           f"({n_patc / max(total_rows, 1):.2%})")
     print(f"Rows ที่ addr_input มี น.ส./โฉนด แต่ building ไม่ว่าง: {n_deed:,} "
           f"({n_deed / max(total_rows, 1):.2%})")
+    print(f"Rows ที่ค่าซ้ำกันหลาย key เกินกว่าที่มีใน addr_input: {n_dup:,} "
+          f"({n_dup / max(total_rows, 1):.2%})")
     print(f"Rows ที่ค่า key สะกดไม่ตรง addr_input (ลบออกด้วย fuzzy/แยกคำ): {n_fuzzy:,}")
 
     if n_out:
@@ -327,10 +365,12 @@ def main():
             blank_key_rows=("blank_key_with_leftover", "count"),
             not_in_patc_rows=("not_in_patc_master", "sum"),
             deed_building_rows=("deed_with_building", "sum"),
+            dup_rows=("duplicate_values", "count"),
         )
         for name, r in by_file.iterrows():
             print(f"  {name:<65} {r.leftover_rows:>9,}  (key ว่าง {r.blank_key_rows:,}, "
-                  f"ไม่มีใน PATC {r.not_in_patc_rows:,}, น.ส./โฉนด+building {r.deed_building_rows:,})")
+                  f"ไม่มีใน PATC {r.not_in_patc_rows:,}, น.ส./โฉนด+building {r.deed_building_rows:,}, "
+                  f"ค่าซ้ำ {r.dup_rows:,})")
 
         word_counts = Counter(t for s in out["leftover"].dropna() for t in s.split(" | "))
         words = pd.DataFrame(word_counts.most_common(), columns=["word", "count"])
@@ -346,7 +386,7 @@ def main():
 
         print(f"\nSaved:")
         print(f"  - {OUT_DIR / 'leftover_rows.parquet'}  ({n_out:,} rows, ไม่มีใน PATC {n_patc:,}, "
-          f"น.ส./โฉนด+building {n_deed:,})")
+          f"น.ส./โฉนด+building {n_deed:,}, ค่าซ้ำ {n_dup:,})")
         print(f"  - {OUT_DIR / 'leftover_blank_key_rows.parquet'}  ({n_blank:,} rows)")
         print(f"  - {OUT_DIR / 'leftover_word_counts.csv'}  ({len(words):,} words)")
     print("=" * 60)
