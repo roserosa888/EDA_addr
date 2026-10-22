@@ -61,6 +61,9 @@ NON_DIGIT_RE = re.compile(r"\D")
 # leftover ที่มีแค่คำเดียวและเป็นคำเหล่านี้ ไม่ต้องส่งออก (หลายคำ เช่น "83 | และ | โฉนดเลขที่ | 8179" ยังส่งออก)
 IGNORE_SINGLE_LEFTOVER = {"โฉนด", "โฉนดที่ดิน"}
 
+# addr_input มีคำว่า น.ส. หรือ โฉนด แต่ building ไม่ว่าง → ส่งออกด้วย แม้ไม่มี leftover
+DEED_RE = re.compile(r"น\.\s*ส\.|โฉนด")
+
 # fuzzy match: \u0E04\u0E48\u0E32 key \u0E2A\u0E30\u0E01\u0E14\u0E15\u0E48\u0E32\u0E07\u0E08\u0E32\u0E01 addr_input \u0E40\u0E25\u0E47\u0E01\u0E19\u0E49\u0E2D\u0E22 (\u0E2D\u0E2D\u0E1F\u0E1F\u0E34\u0E28\u0E40\u0E28\u0E2A / \u0E2D\u0E2D\u0E1F\u0E1F\u0E34\u0E28\u0E40\u0E0B\u0E2A, \u0E40\u0E2E\u0E49\u0E32\u0E2A\u0E4C / \u0E40\u0E2E\u0E32\u0E2A\u0E4C)
 FUZZY_MIN_LEN = 4           # \u0E04\u0E48\u0E32\u0E2A\u0E31\u0E49\u0E19\u0E01\u0E27\u0E48\u0E32\u0E19\u0E35\u0E49\u0E44\u0E21\u0E48\u0E17\u0E33 fuzzy (\u0E01\u0E31\u0E19\u0E44\u0E1B\u0E25\u0E1A\u0E21\u0E31\u0E48\u0E27)
 FUZZY_MAX_DIST_RATIO = 0.3  # edit distance \u0E44\u0E14\u0E49\u0E44\u0E21\u0E48\u0E40\u0E01\u0E34\u0E19 30% \u0E02\u0E2D\u0E07\u0E04\u0E27\u0E32\u0E21\u0E22\u0E32\u0E27\u0E04\u0E48\u0E32
@@ -275,7 +278,9 @@ def main():
                 tokens = []
             # tambol/amphoe/province ไม่ตรงกับ PATC master → ส่งออกด้วย แม้ไม่มี leftover
             not_in_patc = patc_key(rec) not in patc_set
-            if not tokens and not not_in_patc:
+            deed_building = (not is_blank(rec["addr_input"]) and not is_blank(rec["building"])
+                             and bool(DEED_RE.search(str(rec["addr_input"]))))
+            if not tokens and not not_in_patc and not deed_building:
                 continue
             guesses = [guess_field(t) for t in tokens]
             blank_hit = sorted({g for g in guesses if g and is_blank(rec[g])})
@@ -287,12 +292,14 @@ def main():
                 "blank_key_with_leftover": ",".join(blank_hit) or None,
                 "fuzzy_matched_fields": ",".join(fuzzy_fields) or None,
                 "not_in_patc_master": not_in_patc,
+                "deed_with_building": deed_building,
             })
 
     out = pd.DataFrame(results)
     n_out = len(out)
     n_left = int(out["leftover"].notna().sum()) if n_out else 0
     n_patc = int(out["not_in_patc_master"].sum()) if n_out else 0
+    n_deed = int(out["deed_with_building"].sum()) if n_out else 0
     blank_mask = out["blank_key_with_leftover"].notna() if n_out else pd.Series(dtype=bool)
     n_blank = int(blank_mask.sum())
 
@@ -303,6 +310,8 @@ def main():
           f"({n_blank / max(total_rows, 1):.2%})")
     print(f"Rows ที่ tambol/amphoe/province ไม่มีใน PATC_Master1: {n_patc:,} "
           f"({n_patc / max(total_rows, 1):.2%})")
+    print(f"Rows ที่ addr_input มี น.ส./โฉนด แต่ building ไม่ว่าง: {n_deed:,} "
+          f"({n_deed / max(total_rows, 1):.2%})")
     print(f"Rows ที่ค่า key สะกดไม่ตรง addr_input (ลบออกด้วย fuzzy/แยกคำ): {n_fuzzy:,}")
 
     if n_out:
@@ -317,10 +326,11 @@ def main():
             leftover_rows=("leftover", "count"),
             blank_key_rows=("blank_key_with_leftover", "count"),
             not_in_patc_rows=("not_in_patc_master", "sum"),
+            deed_building_rows=("deed_with_building", "sum"),
         )
         for name, r in by_file.iterrows():
             print(f"  {name:<65} {r.leftover_rows:>9,}  (key ว่าง {r.blank_key_rows:,}, "
-                  f"ไม่มีใน PATC {r.not_in_patc_rows:,})")
+                  f"ไม่มีใน PATC {r.not_in_patc_rows:,}, น.ส./โฉนด+building {r.deed_building_rows:,})")
 
         word_counts = Counter(t for s in out["leftover"].dropna() for t in s.split(" | "))
         words = pd.DataFrame(word_counts.most_common(), columns=["word", "count"])
@@ -335,7 +345,8 @@ def main():
         words.to_csv(OUT_DIR / "leftover_word_counts.csv", index=False, encoding="utf-8-sig")
 
         print(f"\nSaved:")
-        print(f"  - {OUT_DIR / 'leftover_rows.parquet'}  ({n_out:,} rows, ไม่มีใน PATC {n_patc:,})")
+        print(f"  - {OUT_DIR / 'leftover_rows.parquet'}  ({n_out:,} rows, ไม่มีใน PATC {n_patc:,}, "
+          f"น.ส./โฉนด+building {n_deed:,})")
         print(f"  - {OUT_DIR / 'leftover_blank_key_rows.parquet'}  ({n_blank:,} rows)")
         print(f"  - {OUT_DIR / 'leftover_word_counts.csv'}  ({len(words):,} words)")
     print("=" * 60)

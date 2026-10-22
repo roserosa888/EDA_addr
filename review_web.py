@@ -18,8 +18,15 @@ FIELDS = ["no", "moo", "mooban", "building", "floor", "room",
           "soi", "road", "tambol", "amphoe", "province", "leftover"]
 COLS = ["addr_input"] + FIELDS
 
-df = pd.read_parquet(SRC).fillna("")
-ROWS = df[COLS].to_dict("records")
+df = pd.read_parquet(SRC)
+FLAGS = ["not_in_patc_master", "deed_with_building"]
+for c in FLAGS:
+    df[c] = df[c].fillna(False).astype(bool)
+df = df.fillna("")
+ROWS = df[COLS + FLAGS].to_dict("records")
+for r in ROWS:
+    for c in FLAGS:
+        r[c] = bool(r[c])
 
 
 def done_inputs():
@@ -52,26 +59,61 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Leftover Review</title>
 <style>
-body{background:#111;color:#ddd;font-family:sans-serif;max-width:700px;margin:20px auto;padding:0 16px}
-input{width:100%;box-sizing:border-box;background:#222;color:#eee;border:1px solid #444;padding:6px}
+body{background:#000;color:#e8dcc8;
+  font-family:sans-serif;max-width:700px;margin:20px auto;padding:0 16px}
+#count{text-align:center;color:#aaa;margin-bottom:12px}
+input{width:100%;box-sizing:border-box;background:#111;color:#f3e9d8;border:1px solid #444;
+  padding:6px;border-radius:4px}
+input:focus{outline:none;border-color:#ff7518;box-shadow:0 0 6px #ff751880}
+#f_leftover{border-color:#ff7518}
 label{display:block;margin-top:8px;font-size:13px;color:#999}
-.addr{background:#1b1b1b;padding:10px;border:1px solid #333;font-size:18px}
-button{margin-top:16px;padding:10px 24px;border:0;color:#fff;cursor:pointer;font-size:15px}
-#edit{background:#2a5db0}#pass{background:#2e7d32}
+.addr{background:#0a0a0a;padding:10px;border:1px solid #ff7518;border-radius:6px;font-size:18px;line-height:1.7}
+.addr mark{background:#ff7518;color:#1a0d00;border-radius:3px;padding:0 2px;font-weight:bold}
+.patc{display:inline-block;margin-top:4px;padding:3px 10px;border-radius:12px;font-size:14px}
+.flags{display:flex;gap:32px;flex-wrap:wrap;margin-top:8px}
+.flags>div{display:flex;align-items:center;gap:8px}
+.flags label,.flags .patc{margin-top:0}
+.patc.yes{background:#7a1010;color:#ffd7c2}.patc.no{background:#1f3d1f;color:#c8f0c8}
+button{margin-top:16px;padding:10px 24px;border:0;border-radius:6px;color:#fff;cursor:pointer;font-size:15px}
+#edit{background:#6a2c91}#pass{background:#d35400}
+button:hover{filter:brightness(1.2)}
+.side{position:fixed;top:0;bottom:0;display:flex;flex-direction:column;justify-content:space-around;
+  font-size:40px;pointer-events:none;opacity:.8}
+.side.l{left:24px}.side.r{right:24px}
+@media(max-width:860px){.side{display:none}}
 </style></head><body>
+<div class="side l"><span>&#127875;</span><span>&#128123;</span><span>&#129415;</span><span>&#127875;</span></div>
+<div class="side r"><span>&#129415;</span><span>&#128375;</span><span>&#127875;</span><span>&#128123;</span></div>
 <div id="count"></div>
 <div id="box"></div>
 <script>
 const F=__FIELDS__;let cur=null;
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function highlight(text,leftover){
+  // mark every occurrence of each leftover token, merging overlapping ranges
+  const toks=leftover.split('|').map(t=>t.trim()).filter(Boolean);
+  const r=[];
+  toks.forEach(t=>{let i=text.indexOf(t);while(i>=0){r.push([i,i+t.length]);i=text.indexOf(t,i+t.length)}});
+  r.sort((a,b)=>a[0]-b[0]);
+  let out='',pos=0;
+  r.forEach(([a,b])=>{if(b<=pos)return;a=Math.max(a,pos);
+    out+=esc(text.slice(pos,a))+'<mark>'+esc(text.slice(a,b))+'</mark>';pos=b});
+  return out+esc(text.slice(pos));
+}
 async function load(){
   const d=await (await fetch('/next')).json();cur=d.row;
   document.getElementById('count').textContent=`เหลือ ${d.remaining} / ${d.total}`;
   const b=document.getElementById('box');
-  if(!cur){b.innerHTML='<p>เสร็จหมดแล้ว</p>';return}
+  if(!cur){b.innerHTML='<p>&#128123; เสร็จหมดแล้ว</p>';return}
+  const p=cur.not_in_patc_master,dw=cur.deed_with_building;
   b.innerHTML='<label>addr_input</label><div class="addr"></div>'+
     F.map(f=>`<label>${f}</label><input id="f_${f}">`).join('')+
-    '<button id="edit">Edit</button> <button id="pass">Pass</button>';
-  b.querySelector('.addr').textContent=cur.addr_input;
+    '<div class="flags">'+
+    `<div><label>not_in_patc_master</label><span class="patc ${p?'yes':'no'}">${p?'True — ไม่มีใน PATC master':'False'}</span></div>`+
+    `<div><label>deed_with_building</label><span class="patc ${dw?'yes':'no'}">${dw?'True':'False'}</span></div>`+
+    '</div>'+
+    '<br><button id="edit">Edit</button> <button id="pass">Pass</button>';
+  b.querySelector('.addr').innerHTML=highlight(cur.addr_input,cur.leftover);
   F.forEach(f=>document.getElementById('f_'+f).value=cur[f]);
   document.getElementById('edit').onclick=()=>save('edit');
   document.getElementById('pass').onclick=()=>save('pass');
@@ -79,7 +121,8 @@ async function load(){
 async function save(action){
   const row={addr_input:cur.addr_input};
   F.forEach(f=>row[f]=document.getElementById('f_'+f).value);
-  await fetch('/save',{method:'POST',body:JSON.stringify({action,row})});
+  const r=await (await fetch('/save',{method:'POST',body:JSON.stringify({action,row})})).json();
+  if(r.error){alert(r.error);return}
   load();
 }
 load();
@@ -103,8 +146,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        append_row(EDIT_CSV if body["action"] == "edit" else PASS_CSV, body["row"])
-        self.send("{}", "application/json")
+        try:
+            append_row(EDIT_CSV if body["action"] == "edit" else PASS_CSV, body["row"])
+            self.send("{}", "application/json")
+        except PermissionError as e:
+            self.send(json.dumps({"error": f"เขียนไฟล์ไม่ได้ (ปิดไฟล์ใน Excel ก่อน): {e.filename}"},
+                                 ensure_ascii=False), "application/json")
 
 
 if __name__ == "__main__":
