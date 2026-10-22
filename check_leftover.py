@@ -22,6 +22,19 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 FIELDS = ["no", "moo", "mooban", "building", "floor", "room",
           "soi", "road", "tambol", "amphoe", "province"]
 
+# ชุด (tambol, amphoe, province) ที่ถูกต้องจาก master ("*" ท้ายชื่อตำบลใน master ตัดทิ้งก่อนเทียบ)
+PATC_MASTER = Path(r"D:\Thai_Adress\fill_data\PATC_Master1.parquet")
+
+
+def load_patc_set():
+    m = pd.read_parquet(PATC_MASTER, columns=["tambol_TH", "amphoe_TH", "province_TH"])
+    m = m.fillna("").astype(str).apply(lambda s: s.str.replace("*", "", regex=False).str.strip())
+    return set(zip(m["tambol_TH"], m["amphoe_TH"], m["province_TH"]))
+
+
+def patc_key(rec):
+    return tuple("" if is_blank(rec[f]) else str(rec[f]).strip() for f in ("tambol", "amphoe", "province"))
+
 # คำนำหน้าของแต่ละ key ใช้ชุดเดียวกับ clean_address.py (ใช้เดาว่าคำที่เหลือควรอยู่ key ไหน)
 FIELD_KEYWORDS = {f: [] for f in FIELDS}
 for _kw, _f, _ in FILL_KEYWORDS:
@@ -249,6 +262,7 @@ def main():
     results = []
     total_rows = 0
     n_fuzzy = 0
+    patc_set = load_patc_set()
     for fp in files:
         df = pd.read_parquet(fp)
         total_rows += len(df)
@@ -257,22 +271,29 @@ def main():
             fuzzy_fields = []
             tokens = find_leftover(rec, fuzzy_fields)
             n_fuzzy += bool(fuzzy_fields)
-            if not tokens or (len(tokens) == 1 and tokens[0] in IGNORE_SINGLE_LEFTOVER):
+            if len(tokens) == 1 and tokens[0] in IGNORE_SINGLE_LEFTOVER:
+                tokens = []
+            # tambol/amphoe/province ไม่ตรงกับ PATC master → ส่งออกด้วย แม้ไม่มี leftover
+            not_in_patc = patc_key(rec) not in patc_set
+            if not tokens and not not_in_patc:
                 continue
             guesses = [guess_field(t) for t in tokens]
             blank_hit = sorted({g for g in guesses if g and is_blank(rec[g])})
             results.append({
                 "source_file": fp.name,
                 **rec,
-                "leftover": " | ".join(tokens),
-                "leftover_field_guess": " | ".join(g or "-" for g in guesses),
+                "leftover": " | ".join(tokens) or None,
+                "leftover_field_guess": " | ".join(g or "-" for g in guesses) or None,
                 "blank_key_with_leftover": ",".join(blank_hit) or None,
                 "fuzzy_matched_fields": ",".join(fuzzy_fields) or None,
+                "not_in_patc_master": not_in_patc,
             })
 
     out = pd.DataFrame(results)
-    n_left = len(out)
-    blank_mask = out["blank_key_with_leftover"].notna() if n_left else pd.Series(dtype=bool)
+    n_out = len(out)
+    n_left = int(out["leftover"].notna().sum()) if n_out else 0
+    n_patc = int(out["not_in_patc_master"].sum()) if n_out else 0
+    blank_mask = out["blank_key_with_leftover"].notna() if n_out else pd.Series(dtype=bool)
     n_blank = int(blank_mask.sum())
 
     print(f"\nRows checked: {total_rows:,}  ({len(files)} files in {GROUP_DIR})")
@@ -280,9 +301,11 @@ def main():
           f"({n_left / max(total_rows, 1):.2%})")
     print(f"  └─ leftover มีคำนำหน้าของ key ที่ว่างอยู่ (เช่น ต.xxx แต่ tambol ว่าง): {n_blank:,} "
           f"({n_blank / max(total_rows, 1):.2%})")
+    print(f"Rows ที่ tambol/amphoe/province ไม่มีใน PATC_Master1: {n_patc:,} "
+          f"({n_patc / max(total_rows, 1):.2%})")
     print(f"Rows ที่ค่า key สะกดไม่ตรง addr_input (ลบออกด้วย fuzzy/แยกคำ): {n_fuzzy:,}")
 
-    if n_left:
+    if n_out:
         print("\n--- จำนวน row ที่ key ว่างแต่มีคำใน addr_input ---")
         field_counts = Counter(f for s in out.loc[blank_mask, "blank_key_with_leftover"] for f in s.split(","))
         for f in FIELDS:
@@ -291,13 +314,15 @@ def main():
 
         print("\n--- แยกตามไฟล์ใน group/ ---")
         by_file = out.groupby("source_file").agg(
-            leftover_rows=("leftover", "size"),
+            leftover_rows=("leftover", "count"),
             blank_key_rows=("blank_key_with_leftover", "count"),
+            not_in_patc_rows=("not_in_patc_master", "sum"),
         )
         for name, r in by_file.iterrows():
-            print(f"  {name:<65} {r.leftover_rows:>9,}  (key ว่าง {r.blank_key_rows:,})")
+            print(f"  {name:<65} {r.leftover_rows:>9,}  (key ว่าง {r.blank_key_rows:,}, "
+                  f"ไม่มีใน PATC {r.not_in_patc_rows:,})")
 
-        word_counts = Counter(t for s in out["leftover"] for t in s.split(" | "))
+        word_counts = Counter(t for s in out["leftover"].dropna() for t in s.split(" | "))
         words = pd.DataFrame(word_counts.most_common(), columns=["word", "count"])
         words["field_guess"] = words["word"].map(guess_field)
 
@@ -310,7 +335,7 @@ def main():
         words.to_csv(OUT_DIR / "leftover_word_counts.csv", index=False, encoding="utf-8-sig")
 
         print(f"\nSaved:")
-        print(f"  - {OUT_DIR / 'leftover_rows.parquet'}  ({n_left:,} rows)")
+        print(f"  - {OUT_DIR / 'leftover_rows.parquet'}  ({n_out:,} rows, ไม่มีใน PATC {n_patc:,})")
         print(f"  - {OUT_DIR / 'leftover_blank_key_rows.parquet'}  ({n_blank:,} rows)")
         print(f"  - {OUT_DIR / 'leftover_word_counts.csv'}  ({len(words):,} words)")
     print("=" * 60)

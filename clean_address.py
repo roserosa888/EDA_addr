@@ -382,14 +382,17 @@ DB_NAME_FIELDS = ("tambol", "amphoe", "province")
 # เลขบ้าน: เลข นำด้วยอักษรไทย 1 ตัวได้ (ไม่ใช่ ม = หมู่) ต่อกันด้วย / - , (มีช่องว่างได้)
 # "191/66", "ข 49/3", "ค.2-ค.3", "1/ 1", "139,141" → เอาทั้งก้อน
 # "และ" คั่นเลขเหมือน "," ("440 และ 442" → เอาทั้งก้อน)
+# อักษรไทย 1 ตัวต่อท้ายเลขได้ ("30/155 ก.", "12ข") แต่ไม่ใช่ตัวย่อ ม/ซ/ถ/ต/อ/จ (หมู่/ซอย/ถนน/ตำบล/อำเภอ/จังหวัด)
 _NO_UNIT = r"(?:(?!ม)[ก-ฮ]\.?\s?)?\d+"
-NO_VALUE_RE = re.compile(rf"{_NO_UNIT}(?:\s*(?:[/\-,]|และ)\s*{_NO_UNIT})*[/\-]?(?![^\s,])")
+_NO_SUFFIX = r"(?:\s?(?![มซถตอจ])[ก-ฮ]\.?)?"
+NO_VALUE_RE = re.compile(rf"{_NO_UNIT}(?:\s*(?:[/\-,]|และ)\s*{_NO_UNIT})*{_NO_SUFFIX}[/\-]?(?![^\s,])")
 # เอกสารสิทธิ์ที่ดิน (โฉนด, น.ส.3, น.ส.3ก, น.ส.3ข, น.ส.4, ส.ป.ก. 4-01) + เลข → เก็บทั้งก้อนเป็น no
 # ตั้งแต่ชื่อเอกสารจนถึงตัวเลขตัวสุดท้าย (รวม บ้านเลขที่/เลขที่ ที่ตามมาติดกัน)
 # "โฉนดเลขที่ 123" → no = "โฉนดเลขที่ 123"
 # "น.ส.3ก เลขที่ 123 บ้านเลขที่ 456" → no = "น.ส.3ก เลขที่ 123 บ้านเลขที่ 456"
 # รูปแบบอื่น: "โฉนดที่ดินเลขที่ 2595, 2596", "น.ส.3ก. 1441", "น.ส.3 ก.เลขที่ 701",
-# "(น.ส.3) ก. 1014", "น.ส.3ข.เลขที่ 164", "นส.4 ที่ 3856", "ส.ป.ก.4-01ข เลขที่ 6898,7132"
+# "(น.ส.3) ก. 1014", "น.ส.3ข.เลขที่ 164", "นส.4 ที่ 3856", "ส.ป.ก.4-01ข เลขที่ 6898,7132",
+# "น.ส.3 ทะเบียนเลขที่ 1508"
 # นส/สปก ไม่มีจุดเลย ("นส3ก", "สปก") ต้องไม่ติดอักษรไทยข้างหน้า (กันไปจับกลางคำ)
 _DEED_NUM = rf"{DIGIT_CLASS}+(?:\s*(?:[,/\-]|และ)\s*{DIGIT_CLASS}+)*"
 _DEED_SUFFIX = r"(?:[กขคจ](?![ก-๎])\.?)?"  # น.ส.3ก, น.ส.3ข, ส.ป.ก.4-01ข
@@ -398,7 +401,7 @@ _DEED_HEAD = (
     rf"(?:โฉนด(?:ที่ดิน)?"
     rf"|\(?(?:น\.?\s*ส\.|{_NOT_IN_WORD}นส)\s*[34๓๔]\s*\)?\s*{_DEED_SUFFIX}"
     rf"|(?:ส\.?\s*ป\.?\s*ก\.|{_NOT_IN_WORD}สปก)\s*(?:[4๔]\s*-\s*{DIGIT_CLASS}{{2}}\s*{_DEED_SUFFIX})?)"
-    rf"\s*(?:เลขที่|เล่มที่|เล่ม|เลข|ที่)?\s*[:\-]?\s*"
+    rf"\s*(?:ทะเบียน\s*)?(?:เลขที่|เล่มที่|เล่ม|เลข|ที่)?\s*[:\-]?\s*"
 )
 # ไม่มีเลขตาม ("โฉนด ตำบล...") → ตัดทิ้ง ไม่เป็นค่าของ key ไหน
 DEED_RE = re.compile(rf"{_DEED_HEAD}(?:{_DEED_NUM})?")
@@ -407,15 +410,38 @@ _HOUSE_NUM = rf"{_NO_UNIT}(?:\s*[/\-,]\s*{_NO_UNIT})*"
 DEED_NO_RE = re.compile(
     rf"{_DEED_HEAD}{_DEED_NUM}(?:\s*,?\s*(?:บ้าน\s*)?เลขที่\s*[:\-]?\s*{_HOUSE_NUM})*"
 )
+# เลขบ้านที่อยู่ติดหน้าเลขโฉนด เก็บรวมใน no ก้อนเดียวกัน ("เลขที่ 5 โฉนดเลขที่ 99")
+DEED_LEAD_NO_RE = re.compile(rf"(?:บ้าน\s*)?เลขที่\s*[:\-]?\s*{_HOUSE_NUM}\s*,?\s*$")
 
 
 def split_deed(v):
     """แยกเลขโฉนด/น.ส.3/น.ส.3ก/น.ส.3ข/น.ส.4/ส.ป.ก. ออกจากข้อความ คืน (ข้อความที่เหลือ, [ค่า no])
-    "น.ส.3ก เลขที่ 123 บ้านเลขที่ 456 ตำบล..." → (" ตำบล...", ["น.ส.3ก เลขที่ 123 บ้านเลขที่ 456"])"""
+    "น.ส.3ก เลขที่ 123 บ้านเลขที่ 456 ตำบล..." → (" ตำบล...", ["น.ส.3ก เลขที่ 123 บ้านเลขที่ 456"])
+    คำนำหน้าของ key อื่นที่อยู่ติดหน้าเลขโฉนด ตัดทิ้งด้วย ตอบแค่ no
+    ("อาคารน.ส.3 ก.เลขที่ 1259 ตำบล..." → (" ตำบล...", ["น.ส.3 ก.เลขที่ 1259"]))
+    เลขบ้านที่อยู่ติดหน้าเลขโฉนด รวมเป็น no ก้อนเดียวกัน
+    ("เลขที่ 5 โฉนดเลขที่ 99 หมู่ 2" → (" หมู่ 2", ["เลขที่ 5 โฉนดเลขที่ 99"]))"""
     if not isinstance(v, str):
         return v, []
-    deeds = [re.sub(r"\s+", " ", m.group(0)).strip() for m in DEED_NO_RE.finditer(v)]
-    return DEED_RE.sub(" ", DEED_NO_RE.sub(" ", v)), deeds
+    deeds = []
+    out, pos = [], 0
+    for m in DEED_NO_RE.finditer(v):
+        start = m.start()
+        before = v[pos:start]
+        lead_no = DEED_LEAD_NO_RE.search(before)
+        if lead_no:
+            start = pos + lead_no.start()
+        else:
+            before = before.rstrip()
+            kw = [k for k in FILL_KEYWORD_RE.finditer(before) if k.end() == len(before)]
+            if kw:
+                start = pos + kw[-1].start()
+        deed = v[lead_no.start() + pos:m.end()] if lead_no else m.group(0)
+        deeds.append(re.sub(r"\s+", " ", deed).strip())
+        out.append(v[pos:start] + " ")
+        pos = m.end()
+    out.append(v[pos:])
+    return DEED_RE.sub(" ", "".join(out)), deeds
 DB_POSTCODE_PATH = r"D:\Thai_Adress\qwen3_8b_lora\EDA\DataStandardList-Postcode_converted.csv"
 
 # ไฟล์แก้ค่ามือ: แถวที่ addr_input ตรงกัน จะถูกแทน 11 key ด้วยค่าในไฟล์ (ช่องว่าง = ไม่มีค่า)
@@ -1149,6 +1175,10 @@ def clean_address_data():
             # "ถ. มหาวิทยาลัย" → เป็นชื่อของ key ก่อนหน้า ไม่ใช่ building
             # คำนำหน้าติดกันในคำเดียว ("ซอยตำบลใหม่") → ยึดคำนำหน้าตัวแรก
             prev_m = matches[i - 1] if i > 0 else None
+            # "อาคารเลขที่3" → เลขที่ตามหลังอาคารเป็นเลขอาคาร (building = 3) ไม่ใช่ no
+            if segs and segs[-1][0] == "building" and col == "no" and not segs[-1][2].strip():
+                segs[-1][2] = body
+                continue
             if (segs and segs[-1][0] != "_stop" and not segs[-1][2].strip()
                     and (kw in KEEP_KEYWORDS or glued_to_prev(prev_m, m, body))):
                 segs[-1][2] = raw + body
@@ -1198,6 +1228,17 @@ def clean_address_data():
                 continue
             if WORD_CHAR_RE.search(v) and v not in found[col]:
                 found[col].append(v)
+
+        # คำนำหน้าประเภทเดียวกัน 2 ค่าที่คล้ายกัน (ค่าสั้นอยู่ในค่ายาว) → เอาตัวที่มีอักษรมากกว่า
+        # ("หมู่บ้านเสนานิเวศน์ ... (หมู่บ้านเสนานิเวศน์ 1)" → mooban = เสนานิเวศน์ 1)
+        # no/moo/floor/room เป็นเลข ("1" อยู่ใน "11" แต่เป็นคนละค่า) ไม่ตัด
+        for col in list(found):
+            if col in ("no", "moo", "floor", "room") or len(found[col]) < 2:
+                continue
+            keys = [x.replace(" ", "") for x in found[col]]
+            found[col] = [x for x, k in zip(found[col], keys)
+                          if not (THAI_CHAR_RE.search(k) and
+                                  any(k != o and k in o for o in keys))]
 
         # 3) เลขบ้านขึ้นต้นโดยไม่มีคำนำหน้า: "191/66 ถ.รัชดาภิเษก ..." → no = 191/66
         #    อักษรไทย 1 ตัว (ไม่ใช่ ม) + เลข เก็บตามที่พิมพ์: "ข 49/3 ถ.วิไลเสนา" → no = "ข 49/3",
@@ -1305,6 +1346,35 @@ def clean_address_data():
                 n_cleared[col] += 1
     print(f"7.4 [ใหม่] ลบค่าที่อยู่ผิด key (มหาวิทยาลัย/มหาลัย/อุทยาน→building, "
           f"นิคมอุตสาหกรรม→mooban) เสร็จแล้ว: {fmt_counts(n_cleared)}")
+
+    # ==========================================
+    # Step 7.56: เลขโฉนด/น.ส.3/น.ส.3ก/น.ส.3ข/น.ส.4/ส.ป.ก. ต้องอยู่ใน no เสมอ
+    #            ถ้าไปอยู่ key อื่นให้ตัดส่วนนั้นทิ้ง (no เติมจาก split_deed แล้วใน Step 7)
+    #            "อาคารโฉนดที่ดินเลขที่ 32 ตำบล..." → no = โฉนดที่ดินเลขที่ 32, building = ว่าง
+    #            ค่าที่ถูกตัดเลขออกไปแล้ว (building = "โฉนดที่ดิน", "น.ส.3 ก.") ก็ตัดด้วย
+    #            เมื่อ no ของ row นั้นเป็นเลขโฉนด
+    # ==========================================
+    n_deed_cleared = defaultdict(int)
+    deed_rows = df["no"].apply(lambda v: isinstance(v, str) and bool(DEED_NO_RE.search(v)))
+    for col in fill_cols:
+        if col == "no":
+            continue
+        mask = df[col].apply(lambda v: isinstance(v, str) and bool(DEED_NO_RE.search(v)))
+        mask |= deed_rows & df[col].apply(lambda v: isinstance(v, str) and bool(DEED_RE.search(v)))
+        for row_idx in df.index[mask]:
+            old_val = df.at[row_idx, col]
+            new_val = re.sub(r"\s+", " ", DEED_RE.sub(" ", old_val)).strip(" ,")
+            df.at[row_idx, col] = new_val if WORD_CHAR_RE.search(new_val) else None
+            modified_indices.add(row_idx)
+            edit_indices.add(row_idx)
+            modified_row_reasons[row_idx].append(
+                f"{col}: '{old_val}' → '{as_text(df.at[row_idx, col])}' "
+                f"[{describe_char_changes(old_val, df.at[row_idx, col])}] (เลขโฉนด/น.ส. ต้องอยู่ใน no)"
+            )
+            mod_logs_total += 1
+            n_deed_cleared[col] += 1
+    print(f"7.45 [ใหม่] ลบเลขโฉนด/น.ส.3/น.ส.4/ส.ป.ก. ที่อยู่ผิด key (ต้องอยู่ใน no) เสร็จแล้ว: "
+          f"{fmt_counts(n_deed_cleared)}")
 
     # ==========================================
     # Step 7.58: ค่าที่ไม่ปรากฏใน addr_input ให้ลบทิ้ง (addr_input เป็นตัวตัดสิน)
